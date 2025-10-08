@@ -288,39 +288,43 @@ Returns an empty string if no icon should be displayed."
 (defun agent-shell--file-mention-completion-at-point ()
   "Provide file path completion after @ symbol.
 Integrates with completion-at-point and company-mode."
-  (when-let* ((bounds (bounds-of-thing-at-point 'filename))
-              (start (car bounds))
-              (end (cdr bounds)))
-    ;; Check if there's an @ before the filename
-    (save-excursion
-      (goto-char start)
-      (when (and (> (point) (point-min))
-                 (eq (char-before) ?@))
-        (let* ((prefix (buffer-substring-no-properties start end))
-               (cwd (agent-shell-cwd))
-               (dir (if (string-prefix-p "/" prefix)
-                        ;; Absolute path
-                        (file-name-directory prefix)
-                      ;; Relative path
-                      (expand-file-name (file-name-directory (or prefix "")) cwd)))
-               (file-prefix (file-name-nondirectory prefix))
-               (candidates (when (and dir (file-directory-p dir))
-                            (directory-files dir nil
-                                           (concat "^" (regexp-quote file-prefix))))))
-          (when candidates
-            (list start end
-                  (mapcar (lambda (file)
-                           (if (string-prefix-p "/" prefix)
-                               (concat dir file)
-                             (if (string= (file-name-directory (or prefix "")) "")
-                                 file
-                               (concat (file-name-directory prefix) file))))
-                         candidates)
-                  :annotation-function
-                  (lambda (cand)
-                    (if (file-directory-p (expand-file-name cand cwd))
-                        " <dir>"
-                      "")))))))))
+  (save-excursion
+    ;; Look backward to find @ symbol
+    (let ((end (point))
+          (start nil))
+      ;; Search backward for @ followed by filename chars or nothing
+      (when (re-search-backward "@\\([^@[:space:]]*\\)" (line-beginning-position) t)
+        (setq start (match-beginning 1))
+        ;; Make sure we're at the right position (within or right after the @)
+        (when (and (>= end start) (<= end (match-end 1)))
+          (let* ((prefix (buffer-substring-no-properties start end))
+                 (cwd (agent-shell-cwd))
+                 (dir (if (string-prefix-p "/" prefix)
+                          ;; Absolute path
+                          (file-name-directory prefix)
+                        ;; Relative path
+                        (expand-file-name (file-name-directory (or prefix "")) cwd)))
+                 (file-prefix (file-name-nondirectory prefix))
+                 (candidates (when (and dir (file-directory-p dir))
+                              (directory-files dir nil
+                                             (if (string-empty-p file-prefix)
+                                                 "^[^.]"  ; Don't show hidden files by default
+                                               (concat "^" (regexp-quote file-prefix)))))))
+            (when candidates
+              (list start end
+                    (mapcar (lambda (file)
+                             (if (string-prefix-p "/" prefix)
+                                 (concat dir file)
+                               (if (string= (file-name-directory (or prefix "")) "")
+                                   file
+                                 (concat (file-name-directory prefix) file))))
+                           candidates)
+                    :annotation-function
+                    (lambda (cand)
+                      (if (file-directory-p (expand-file-name cand cwd))
+                          " <dir>"
+                        ""))
+                    :company-docsig #'identity))))))))
 
 (defun agent-shell--setup-completion ()
   "Setup completion-at-point for file mentions."
