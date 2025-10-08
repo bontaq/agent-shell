@@ -398,8 +398,7 @@ Returns an empty string if no icon should be displayed."
             :client (map-elt agent-shell--state :client)
             :request (acp-make-session-prompt-request
                       :session-id (map-elt agent-shell--state :session-id)
-                      :prompt `[((type . "text")
-                                 (text . ,(substring-no-properties command)))])
+                      :prompt (agent-shell--build-prompt-content command))
             :on-success (lambda (response)
                           (with-current-buffer (map-elt shell :buffer)
                             (let ((success (equal (map-elt response 'stopReason)
@@ -695,6 +694,98 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
 (defun agent-shell--resolve-path (path)
   "Resolve PATH using `agent-shell-path-resolver-function'."
   (funcall (or agent-shell-path-resolver-function #'identity) path))
+
+(defun agent-shell--parse-file-mentions (text)
+  "Parse file mentions from TEXT.
+Returns list of alists with :path, :match, :start, :end keys.
+File mentions use @ syntax: @filename or @\"file with spaces\".
+Example: ((:path \"file.txt\" :match \"@file.txt\" :start 10 :end 19))"
+  (let ((regex "\\(?:^\\|[[:space:]]\\)\\(@\\(?:\\\"\\([^\\\"]+\\)\\\"\\|\\([^[:space:]\\\"]+\\)\\)\\)")
+        (mentions '()))
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (while (re-search-forward regex nil t)
+        (let* ((full-match (match-string 1))
+               (quoted-path (match-string 2))
+               (unquoted-path (match-string 3))
+               (path (or quoted-path unquoted-path))
+               (start (match-beginning 1))
+               (end (match-end 1)))
+          (push (list (cons :path path)
+                     (cons :match full-match)
+                     (cons :start start)
+                     (cons :end end))
+                mentions))))
+    (nreverse mentions)))
+
+(defun agent-shell--build-prompt-content (command-text)
+  "Build multi-content prompt array from COMMAND-TEXT with file mentions.
+Returns vector suitable for acp-make-session-prompt-request :prompt parameter.
+Parses @file mentions and embeds file contents as ContentBlock::Resource."
+  (let* ((mentions (agent-shell--parse-file-mentions command-text))
+         (content-blocks '())
+         (last-pos 0))
+
+    (if (null mentions)
+        ;; No mentions - return simple text block
+        (vector `((type . "text")
+                 (text . ,(substring-no-properties command-text))))
+
+      ;; Process mentions and interleave text blocks
+      (dolist (mention mentions)
+        (let* ((path (map-elt mention :path))
+               (start (map-elt mention :start))
+               (end (map-elt mention :end))
+               (resolved-path nil))
+
+          ;; Add text before this mention
+          (when (> start last-pos)
+            (push `((type . "text")
+                   (text . ,(substring-no-properties command-text last-pos start)))
+                  content-blocks))
+
+          ;; Try to read and add resource block
+          (condition-case err
+              (progn
+                (setq resolved-path
+                      (agent-shell--resolve-path
+                       (expand-file-name path (agent-shell-cwd))))
+
+                ;; Check if file exists and is readable
+                (unless (file-exists-p resolved-path)
+                  (error "File not found"))
+                (unless (file-readable-p resolved-path)
+                  (error "Permission denied"))
+
+                ;; Read file content
+                (let ((content (with-temp-buffer
+                                (insert-file-contents resolved-path)
+                                (buffer-string))))
+                  ;; Add resource block
+                  (push `((type . "resource")
+                         (resource . ((uri . ,(concat "file://" resolved-path))
+                                     (text . ,content)
+                                     (mimeType . "text/plain"))))
+                        content-blocks)))
+            (error
+             ;; On error, add text block with error message
+             (push `((type . "text")
+                    (text . ,(format "[Error reading %s: %s]"
+                                   path
+                                   (error-message-string err))))
+                   content-blocks)))
+
+          (setq last-pos end)))
+
+      ;; Add remaining text after last mention
+      (when (< last-pos (length command-text))
+        (push `((type . "text")
+               (text . ,(substring-no-properties command-text last-pos)))
+              content-blocks))
+
+      ;; Return as vector
+      (vconcat (nreverse content-blocks)))))
 
 (defun agent-shell--get-devcontainer-workspace-path (cwd)
   "Return devcontainer workspaceFolder for CWD; signal error if none found.
