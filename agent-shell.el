@@ -371,6 +371,7 @@ Completion behavior:
              ;; Case 4: @ with no path -> project-wide files
              (t
               (let* ((proj (project-current nil))
+                     (proj-root (when proj (project-root proj)))
                      (candidates (when proj
                                    (condition-case nil
                                        (project-files proj)
@@ -379,11 +380,11 @@ Completion behavior:
                   (list start end
                         ;; Return relative paths from project root
                         (mapcar (lambda (file)
-                                 (file-relative-name file (project-root proj)))
+                                 (file-relative-name file proj-root))
                                candidates)
                         :annotation-function
                         (lambda (cand)
-                          (if (file-directory-p (expand-file-name cand (project-root proj)))
+                          (if (file-directory-p (expand-file-name cand proj-root))
                               " <dir>"
                             ""))))))))))))))
 
