@@ -339,7 +339,8 @@ Returns an empty string if no icon should be displayed."
             :request (acp-make-initialize-request
                       :protocol-version 1
                       :read-text-file-capability agent-shell-text-file-capabilities
-                      :write-text-file-capability agent-shell-text-file-capabilities)
+                      :write-text-file-capability agent-shell-text-file-capabilities
+                      :embedded-context-capability t) ; Enable for file mention support
             :on-success (lambda (_response)
                           ;; TODO: More to be handled?
                           (with-current-buffer (map-elt shell :buffer)
