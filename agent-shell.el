@@ -287,7 +287,13 @@ Returns an empty string if no icon should be displayed."
 
 (defun agent-shell--file-mention-completion-at-point ()
   "Provide file path completion after @ symbol.
-Integrates with completion-at-point and company-mode."
+Integrates with completion-at-point and company-mode.
+
+Completion behavior:
+  @filename    -> All files in project (using project.el)
+  @./file      -> Files in current directory only
+  @path/file   -> Files in specific subdirectory
+  @/abs/path   -> Absolute path completion"
   (save-excursion
     ;; Look backward to find @ symbol
     (let ((end (point))
@@ -298,42 +304,88 @@ Integrates with completion-at-point and company-mode."
         ;; Make sure we're at the right position (within or right after the @)
         (when (and (>= end start) (<= end (match-end 1)))
           (let* ((prefix (buffer-substring-no-properties start end))
-                 (cwd (agent-shell-cwd))
-                 (dir (cond
-                       ;; Absolute path
-                       ((string-prefix-p "/" prefix)
-                        (or (file-name-directory prefix) "/"))
-                       ;; Relative path with directory
-                       ((file-name-directory prefix)
-                        (expand-file-name (file-name-directory prefix) cwd))
-                       ;; No directory, use cwd
-                       (t cwd)))
-                 (file-prefix (or (file-name-nondirectory prefix) ""))
-                 (candidates (when (and dir (file-directory-p dir))
-                              (condition-case nil
-                                  (directory-files dir nil
-                                                 (if (string-empty-p file-prefix)
-                                                     "^[^.]"  ; Don't show hidden files by default
-                                                   (concat "^" (regexp-quote file-prefix))))
-                                (error nil)))))
-            (when candidates
-              (list start end
-                    (mapcar (lambda (file)
-                             (cond
-                              ;; Absolute path
-                              ((string-prefix-p "/" prefix)
-                               (concat dir file))
-                              ;; Has directory component
-                              ((file-name-directory prefix)
-                               (concat (file-name-directory prefix) file))
-                              ;; Just filename
-                              (t file)))
-                           candidates)
-                    :annotation-function
-                    (lambda (cand)
-                      (if (file-directory-p (expand-file-name cand cwd))
-                          " <dir>"
-                        ""))))))))))
+                 (cwd (agent-shell-cwd)))
+            (cond
+             ;; Case 1: @./ -> current directory only
+             ((string-prefix-p "./" prefix)
+              (let* ((dir cwd)
+                     (file-prefix (substring prefix 2))
+                     (candidates (when (file-directory-p dir)
+                                   (condition-case nil
+                                       (directory-files dir nil
+                                                      (if (string-empty-p file-prefix)
+                                                          "^[^.]"
+                                                        (concat "^" (regexp-quote file-prefix))))
+                                     (error nil)))))
+                (when candidates
+                  (list start end
+                        (mapcar (lambda (file) (concat "./" file)) candidates)
+                        :annotation-function
+                        (lambda (cand)
+                          (if (file-directory-p (expand-file-name cand cwd))
+                              " <dir>"
+                            ""))))))
+
+             ;; Case 2: Absolute path
+             ((string-prefix-p "/" prefix)
+              (let* ((dir (or (file-name-directory prefix) "/"))
+                     (file-prefix (or (file-name-nondirectory prefix) ""))
+                     (candidates (when (file-directory-p dir)
+                                   (condition-case nil
+                                       (directory-files dir nil
+                                                      (if (string-empty-p file-prefix)
+                                                          "^[^.]"
+                                                        (concat "^" (regexp-quote file-prefix))))
+                                     (error nil)))))
+                (when candidates
+                  (list start end
+                        (mapcar (lambda (file) (concat dir file)) candidates)
+                        :annotation-function
+                        (lambda (cand)
+                          (if (file-directory-p cand)
+                              " <dir>"
+                            ""))))))
+
+             ;; Case 3: Relative path with directory (e.g., src/file)
+             ((file-name-directory prefix)
+              (let* ((dir (expand-file-name (file-name-directory prefix) cwd))
+                     (file-prefix (or (file-name-nondirectory prefix) ""))
+                     (candidates (when (file-directory-p dir)
+                                   (condition-case nil
+                                       (directory-files dir nil
+                                                      (if (string-empty-p file-prefix)
+                                                          "^[^.]"
+                                                        (concat "^" (regexp-quote file-prefix))))
+                                     (error nil)))))
+                (when candidates
+                  (list start end
+                        (mapcar (lambda (file)
+                                 (concat (file-name-directory prefix) file))
+                               candidates)
+                        :annotation-function
+                        (lambda (cand)
+                          (if (file-directory-p (expand-file-name cand cwd))
+                              " <dir>"
+                            ""))))))
+
+             ;; Case 4: @ with no path -> project-wide files
+             (t
+              (let* ((proj (project-current nil))
+                     (candidates (when proj
+                                   (condition-case nil
+                                       (project-files proj)
+                                     (error nil)))))
+                (when candidates
+                  (list start end
+                        ;; Return relative paths from project root
+                        (mapcar (lambda (file)
+                                 (file-relative-name file (project-root proj)))
+                               candidates)
+                        :annotation-function
+                        (lambda (cand)
+                          (if (file-directory-p (expand-file-name cand (project-root proj)))
+                              " <dir>"
+                            ""))))))))))))))
 
 (defun agent-shell--maybe-trigger-file-completion ()
   "Trigger completion if @ was just typed."
