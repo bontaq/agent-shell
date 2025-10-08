@@ -371,22 +371,24 @@ Completion behavior:
              ;; Case 4: @ with no path -> project-wide files
              (t
               (let* ((proj (project-current nil))
-                     (proj-root (when proj (project-root proj)))
                      (candidates (when proj
                                    (condition-case nil
                                        (project-files proj)
                                      (error nil)))))
                 (when candidates
-                  (list start end
-                        ;; Return relative paths from project root
-                        (mapcar (lambda (file)
-                                 (file-relative-name file proj-root))
-                               candidates)
-                        :annotation-function
-                        (lambda (cand)
-                          (if (file-directory-p (expand-file-name cand proj-root))
-                              " <dir>"
-                            ""))))))))))))))
+                  (let ((proj-root (project-root proj)))
+                    (list start end
+                          ;; Return relative paths from project root
+                          (mapcar (lambda (file)
+                                   (file-relative-name file proj-root))
+                                 candidates)
+                          :annotation-function
+                          (lambda (cand)
+                            (let ((current-proj (project-current nil)))
+                              (when current-proj
+                                (if (file-directory-p (expand-file-name cand (project-root current-proj)))
+                                    " <dir>"
+                                  ""))))))))))))))))
 
 (defun agent-shell--maybe-trigger-file-completion ()
   "Trigger completion if @ was just typed."
