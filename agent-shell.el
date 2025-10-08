@@ -293,28 +293,17 @@ Returns a completion table function suitable for fuzzy matching."
         '(metadata (category . file))
       (complete-with-action action candidates string pred))))
 
-(defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd hide-dotfiles)
+(defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd)
   "Helper for directory-based completion.
 START and END are completion bounds, DIR is directory to search,
 FILE-PREFIX filters files, PREFIX-TRANSFORM is function to transform results,
-CWD is current working directory for annotation.
-HIDE-DOTFILES controls whether to filter out files starting with '.'."
+CWD is current working directory for annotation."
   (let ((candidates (when (file-directory-p dir)
                      (condition-case nil
                          (directory-files dir nil
-                                        (cond
-                                         ;; User typed a prefix starting with dot - show dotfiles
-                                         ((and (not (string-empty-p file-prefix))
-                                               (string-prefix-p "." file-prefix))
-                                          (concat "^" (regexp-quote file-prefix)))
-                                         ;; Hide dotfiles if requested and no prefix
-                                         ((and hide-dotfiles (string-empty-p file-prefix))
-                                          "^[^.]")
-                                         ;; Filter by prefix
-                                         ((not (string-empty-p file-prefix))
-                                          (concat "^" (regexp-quote file-prefix)))
-                                         ;; Show all files
-                                         (t nil)))
+                                        (if (string-empty-p file-prefix)
+                                            nil  ; No filter - show all files
+                                          (concat "^" (regexp-quote file-prefix))))
                        (error nil)))))
     (when candidates
       (list start end
@@ -332,8 +321,7 @@ Integrates with completion-at-point and company-mode.
 
 Completion behavior:
   @filename    -> All files in project (using project.el)
-  @./file      -> Files in current directory only
-  @path/file   -> Files in specific subdirectory
+  @path/file   -> Files in relative path subdirectory
   @/abs/path   -> Absolute path completion"
   (save-excursion
     ;; Look backward to find @ symbol
@@ -347,35 +335,23 @@ Completion behavior:
           (let* ((prefix (buffer-substring-no-properties start end))
                  (cwd (agent-shell-cwd)))
             (cond
-             ;; Case 1: @./ -> current directory only
-             ((string-prefix-p "./" prefix)
-              (let ((subpath (substring prefix 2)))
-                (agent-shell--directory-completion
-                 start end cwd subpath
-                 (lambda (file) (concat "./" file))
-                 cwd
-                 ;; Hide dotfiles only at immediate ./ level, not in subdirectories
-                 (not (string-match-p "/" subpath)))))
-
-             ;; Case 2: Absolute path
+             ;; Case 1: Absolute path
              ((string-prefix-p "/" prefix)
               (let ((dir (or (file-name-directory prefix) "/")))
                 (agent-shell--directory-completion
                  start end dir (or (file-name-nondirectory prefix) "")
                  (lambda (file) (concat dir file))
-                 dir
-                 nil))) ; Don't hide dotfiles in explicit paths
+                 dir)))
 
-             ;; Case 3: Relative path with directory (e.g., src/file)
+             ;; Case 2: Relative path with directory (e.g., src/file, ./file, .config/file)
              ((file-name-directory prefix)
               (let ((dir (expand-file-name (file-name-directory prefix) cwd)))
                 (agent-shell--directory-completion
                  start end dir (or (file-name-nondirectory prefix) "")
                  (lambda (file) (concat (file-name-directory prefix) file))
-                 cwd
-                 nil))) ; Don't hide dotfiles in subdirectories
+                 cwd)))
 
-             ;; Case 4: @ with no path -> project-wide files
+             ;; Case 3: @ with no path -> project-wide files
              (t
               (let* ((proj (project-current nil))
                      (candidates (when proj
