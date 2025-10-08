@@ -376,12 +376,16 @@ Completion behavior:
                                        (project-files proj)
                                      (error nil)))))
                 (when candidates
-                  (let ((proj-root (project-root proj)))
+                  (let* ((proj-root (project-root proj))
+                         (file-list (mapcar (lambda (file)
+                                             (file-relative-name file proj-root))
+                                           candidates)))
                     (list start end
-                          ;; Return relative paths from project root
-                          (mapcar (lambda (file)
-                                   (file-relative-name file proj-root))
-                                 candidates)
+                          ;; Return completion table with metadata for fuzzy matching
+                          (lambda (string pred action)
+                            (if (eq action 'metadata)
+                                '(metadata (category . file))
+                              (complete-with-action action file-list string pred)))
                           :annotation-function
                           (lambda (cand)
                             (let ((current-proj (project-current nil)))
@@ -404,6 +408,10 @@ Completion behavior:
   ;; Allow company-mode to trigger immediately after @ (no minimum prefix)
   (when (boundp 'company-minimum-prefix-length)
     (setq-local company-minimum-prefix-length 0))
+  ;; Configure orderless to treat dots and slashes as component separators
+  ;; This enables patterns like @us.ai.not to match using-ai-notes.org
+  (when (boundp 'orderless-component-separator)
+    (setq-local orderless-component-separator "[ ./]"))
   ;; Trigger completion automatically when @ is typed
   (add-hook 'post-self-insert-hook
             #'agent-shell--maybe-trigger-file-completion nil t))
