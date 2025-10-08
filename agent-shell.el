@@ -754,6 +754,55 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
   "Resolve PATH using `agent-shell-path-resolver-function'."
   (funcall (or agent-shell-path-resolver-function #'identity) path))
 
+;; File mention edge case handling
+
+(defcustom agent-shell-file-mention-max-size (* 1024 1024)
+  "Maximum file size in bytes for file mentions.
+Files larger than this will be rejected.
+Default is 1MB (1048576 bytes)."
+  :type 'integer
+  :group 'agent-shell)
+
+(defcustom agent-shell-file-mention-text-extensions
+  '("txt" "md" "org" "el" "lisp" "c" "cpp" "h" "hpp" "py" "js" "ts" "tsx" "jsx"
+    "java" "go" "rs" "rb" "php" "sh" "bash" "zsh" "fish" "json" "xml" "yaml" "yml"
+    "toml" "ini" "conf" "cfg" "html" "css" "scss" "sass" "less" "sql" "r"
+    "tex" "lua" "vim" "clj" "cljs" "edn" "scm" "rkt" "hs" "ml" "fs" "swift"
+    "kt" "kts" "scala" "dart" "erl" "ex" "exs" "jl" "nim" "zig" "v" "makefile")
+  "File extensions considered safe text files for mentions."
+  :type '(repeat string)
+  :group 'agent-shell)
+
+(defun agent-shell--check-file-size (path)
+  "Check if file at PATH exceeds size limit.
+Returns nil if ok, error message string if too large."
+  (let ((size (file-attribute-size (file-attributes path))))
+    (when (and size (> size agent-shell-file-mention-max-size))
+      (format "File too large: %.1f MB (max %.1f MB)"
+              (/ size 1048576.0)
+              (/ agent-shell-file-mention-max-size 1048576.0)))))
+
+(defun agent-shell--is-text-file-p (path)
+  "Check if file at PATH is likely a text file.
+Returns t if text, nil if binary."
+  (let ((ext (downcase (or (file-name-extension path) ""))))
+    (or (member ext agent-shell-file-mention-text-extensions)
+        ;; Fallback: scan first 8KB for null bytes
+        (condition-case nil
+            (with-temp-buffer
+              (insert-file-contents path nil 0 (min 8192 (file-attribute-size
+                                                           (file-attributes path))))
+              (not (string-match-p "\000" (buffer-string))))
+          (error nil)))))
+
+(defun agent-shell--is-safe-path-p (path cwd)
+  "Check if PATH is safe to read relative to CWD.
+Returns t if safe, nil otherwise."
+  (let ((resolved (expand-file-name path cwd)))
+    (or (file-in-directory-p resolved cwd)
+        ;; Allow absolute paths only if they're explicitly provided
+        (file-name-absolute-p path))))
+
 (defun agent-shell--parse-file-mentions (text)
   "Parse file mentions from TEXT.
 Returns list of alists with :path, :match, :start, :end keys.
@@ -816,11 +865,17 @@ Parses @file mentions and embeds file contents as ContentBlock::Resource."
                       (agent-shell--resolve-path
                        (expand-file-name path (agent-shell-cwd))))
 
-                ;; Check if file exists and is readable
+                ;; Validate file
                 (unless (file-exists-p resolved-path)
                   (error "File not found"))
                 (unless (file-readable-p resolved-path)
                   (error "Permission denied"))
+                (unless (agent-shell--is-safe-path-p path (agent-shell-cwd))
+                  (error "Path outside workspace"))
+                (when-let ((size-error (agent-shell--check-file-size resolved-path)))
+                  (error "%s" size-error))
+                (unless (agent-shell--is-text-file-p resolved-path)
+                  (error "Binary file not supported"))
 
                 ;; Read file content
                 (let ((content (with-temp-buffer
