@@ -299,32 +299,41 @@ Integrates with completion-at-point and company-mode."
         (when (and (>= end start) (<= end (match-end 1)))
           (let* ((prefix (buffer-substring-no-properties start end))
                  (cwd (agent-shell-cwd))
-                 (dir (if (string-prefix-p "/" prefix)
-                          ;; Absolute path
-                          (file-name-directory prefix)
-                        ;; Relative path
-                        (expand-file-name (file-name-directory (or prefix "")) cwd)))
-                 (file-prefix (file-name-nondirectory prefix))
+                 (dir (cond
+                       ;; Absolute path
+                       ((string-prefix-p "/" prefix)
+                        (or (file-name-directory prefix) "/"))
+                       ;; Relative path with directory
+                       ((file-name-directory prefix)
+                        (expand-file-name (file-name-directory prefix) cwd))
+                       ;; No directory, use cwd
+                       (t cwd)))
+                 (file-prefix (or (file-name-nondirectory prefix) ""))
                  (candidates (when (and dir (file-directory-p dir))
-                              (directory-files dir nil
-                                             (if (string-empty-p file-prefix)
-                                                 "^[^.]"  ; Don't show hidden files by default
-                                               (concat "^" (regexp-quote file-prefix)))))))
+                              (condition-case nil
+                                  (directory-files dir nil
+                                                 (if (string-empty-p file-prefix)
+                                                     "^[^.]"  ; Don't show hidden files by default
+                                                   (concat "^" (regexp-quote file-prefix))))
+                                (error nil)))))
             (when candidates
               (list start end
                     (mapcar (lambda (file)
-                             (if (string-prefix-p "/" prefix)
-                                 (concat dir file)
-                               (if (string= (file-name-directory (or prefix "")) "")
-                                   file
-                                 (concat (file-name-directory prefix) file))))
+                             (cond
+                              ;; Absolute path
+                              ((string-prefix-p "/" prefix)
+                               (concat dir file))
+                              ;; Has directory component
+                              ((file-name-directory prefix)
+                               (concat (file-name-directory prefix) file))
+                              ;; Just filename
+                              (t file)))
                            candidates)
                     :annotation-function
                     (lambda (cand)
                       (if (file-directory-p (expand-file-name cand cwd))
                           " <dir>"
-                        ""))
-                    :company-docsig #'identity))))))))
+                        ""))))))))))
 
 (defun agent-shell--setup-completion ()
   "Setup completion-at-point for file mentions."
