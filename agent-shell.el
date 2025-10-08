@@ -438,12 +438,27 @@ Integrates with completion-at-point and company-mode."
             :on-failure (agent-shell--make-error-handler
                          :state agent-shell--state :shell shell)))
           (t
-           (acp-send-request
-            :client (map-elt agent-shell--state :client)
-            :request (acp-make-session-prompt-request
-                      :session-id (map-elt agent-shell--state :session-id)
-                      :prompt (agent-shell--build-prompt-content command))
-            :on-success (lambda (response)
+           (let* ((prompt-result (agent-shell--build-prompt-content command))
+                  (prompt-content (car prompt-result))
+                  (attached-files (cdr prompt-result)))
+             ;; Show dialog for attached files
+             (when attached-files
+               (agent-shell--update-dialog-block
+                :state agent-shell--state
+                :block-id "attached-files"
+                :label-left (format "📎 %d file%s attached"
+                                  (length attached-files)
+                                  (if (= (length attached-files) 1) "" "s"))
+                :body (mapconcat (lambda (f) (format "  • %s" f))
+                                attached-files
+                                "\n")
+                :create-new t))
+             (acp-send-request
+              :client (map-elt agent-shell--state :client)
+              :request (acp-make-session-prompt-request
+                        :session-id (map-elt agent-shell--state :session-id)
+                        :prompt prompt-content)
+              :on-success (lambda (response)
                           (with-current-buffer (map-elt shell :buffer)
                             (let ((success (equal (map-elt response 'stopReason)
                                                   "end_turn")))
@@ -452,9 +467,9 @@ Integrates with completion-at-point and company-mode."
                                          (agent-shell--stop-reason-description
                                           (map-elt response 'stopReason))))
                               (funcall (map-elt shell :finish-output) t))))
-            :on-failure (lambda (error raw-message)
-                          (funcall (agent-shell--make-error-handler :state agent-shell--state :shell shell)
-                                   error raw-message)))))))
+              :on-failure (lambda (error raw-message)
+                            (funcall (agent-shell--make-error-handler :state agent-shell--state :shell shell)
+                                     error raw-message))))))))
 
 (cl-defun agent-shell--subscribe-to-client-events (&key state)
   "Subscribe SHELL and STATE to ACP events."
@@ -766,16 +781,20 @@ Example: ((:path \"file.txt\" :match \"@file.txt\" :start 10 :end 19))"
 
 (defun agent-shell--build-prompt-content (command-text)
   "Build multi-content prompt array from COMMAND-TEXT with file mentions.
-Returns vector suitable for acp-make-session-prompt-request :prompt parameter.
+Returns cons (CONTENT . ATTACHED-FILES) where:
+- CONTENT is vector suitable for acp-make-session-prompt-request :prompt parameter
+- ATTACHED-FILES is list of successfully attached file paths
 Parses @file mentions and embeds file contents as ContentBlock::Resource."
   (let* ((mentions (agent-shell--parse-file-mentions command-text))
          (content-blocks '())
+         (attached-files '())
          (last-pos 0))
 
     (if (null mentions)
         ;; No mentions - return simple text block
-        (vector `((type . "text")
-                 (text . ,(substring-no-properties command-text))))
+        (cons (vector `((type . "text")
+                       (text . ,(substring-no-properties command-text))))
+              nil)
 
       ;; Process mentions and interleave text blocks
       (dolist (mention mentions)
@@ -812,7 +831,9 @@ Parses @file mentions and embeds file contents as ContentBlock::Resource."
                          (resource . ((uri . ,(concat "file://" resolved-path))
                                      (text . ,content)
                                      (mimeType . "text/plain"))))
-                        content-blocks)))
+                        content-blocks)
+                  ;; Track successfully attached file
+                  (push path attached-files)))
             (error
              ;; On error, add text block with error message
              (push `((type . "text")
@@ -829,8 +850,9 @@ Parses @file mentions and embeds file contents as ContentBlock::Resource."
                (text . ,(substring-no-properties command-text last-pos)))
               content-blocks))
 
-      ;; Return as vector
-      (vconcat (nreverse content-blocks)))))
+      ;; Return content and attached files list
+      (cons (vconcat (nreverse content-blocks))
+            (nreverse attached-files)))))
 
 (defun agent-shell--get-devcontainer-workspace-path (cwd)
   "Return devcontainer workspaceFolder for CWD; signal error if none found.
