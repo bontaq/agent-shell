@@ -285,6 +285,36 @@ Returns an empty string if no icon should be displayed."
 
 (shell-maker-define-major-mode (agent-shell--make-config) agent-shell-mode-map)
 
+(defun agent-shell--make-file-completion-table (candidates)
+  "Create completion table for CANDIDATES with file metadata.
+Returns a completion table function suitable for fuzzy matching."
+  (lambda (string pred action)
+    (if (eq action 'metadata)
+        '(metadata (category . file))
+      (complete-with-action action candidates string pred))))
+
+(defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd)
+  "Helper for directory-based completion.
+START and END are completion bounds, DIR is directory to search,
+FILE-PREFIX filters files, PREFIX-TRANSFORM is function to transform results,
+CWD is current working directory for annotation."
+  (let ((candidates (when (file-directory-p dir)
+                     (condition-case nil
+                         (directory-files dir nil
+                                        (if (string-empty-p file-prefix)
+                                            "^[^.]"
+                                          (concat "^" (regexp-quote file-prefix))))
+                       (error nil)))))
+    (when candidates
+      (list start end
+            (agent-shell--make-file-completion-table
+             (mapcar prefix-transform candidates))
+            :annotation-function
+            (lambda (cand)
+              (if (file-directory-p (expand-file-name cand cwd))
+                  " <dir>"
+                ""))))))
+
 (defun agent-shell--file-mention-completion-at-point ()
   "Provide file path completion after @ symbol.
 Integrates with completion-at-point and company-mode.
@@ -308,65 +338,26 @@ Completion behavior:
             (cond
              ;; Case 1: @./ -> current directory only
              ((string-prefix-p "./" prefix)
-              (let* ((dir cwd)
-                     (file-prefix (substring prefix 2))
-                     (candidates (when (file-directory-p dir)
-                                   (condition-case nil
-                                       (directory-files dir nil
-                                                      (if (string-empty-p file-prefix)
-                                                          "^[^.]"
-                                                        (concat "^" (regexp-quote file-prefix))))
-                                     (error nil)))))
-                (when candidates
-                  (list start end
-                        (mapcar (lambda (file) (concat "./" file)) candidates)
-                        :annotation-function
-                        (lambda (cand)
-                          (if (file-directory-p (expand-file-name cand cwd))
-                              " <dir>"
-                            ""))))))
+              (agent-shell--directory-completion
+               start end cwd (substring prefix 2)
+               (lambda (file) (concat "./" file))
+               cwd))
 
              ;; Case 2: Absolute path
              ((string-prefix-p "/" prefix)
-              (let* ((dir (or (file-name-directory prefix) "/"))
-                     (file-prefix (or (file-name-nondirectory prefix) ""))
-                     (candidates (when (file-directory-p dir)
-                                   (condition-case nil
-                                       (directory-files dir nil
-                                                      (if (string-empty-p file-prefix)
-                                                          "^[^.]"
-                                                        (concat "^" (regexp-quote file-prefix))))
-                                     (error nil)))))
-                (when candidates
-                  (list start end
-                        (mapcar (lambda (file) (concat dir file)) candidates)
-                        :annotation-function
-                        (lambda (cand)
-                          (if (file-directory-p cand)
-                              " <dir>"
-                            ""))))))
+              (let ((dir (or (file-name-directory prefix) "/")))
+                (agent-shell--directory-completion
+                 start end dir (or (file-name-nondirectory prefix) "")
+                 (lambda (file) (concat dir file))
+                 dir)))
 
              ;; Case 3: Relative path with directory (e.g., src/file)
              ((file-name-directory prefix)
-              (let* ((dir (expand-file-name (file-name-directory prefix) cwd))
-                     (file-prefix (or (file-name-nondirectory prefix) ""))
-                     (candidates (when (file-directory-p dir)
-                                   (condition-case nil
-                                       (directory-files dir nil
-                                                      (if (string-empty-p file-prefix)
-                                                          "^[^.]"
-                                                        (concat "^" (regexp-quote file-prefix))))
-                                     (error nil)))))
-                (when candidates
-                  (list start end
-                        (mapcar (lambda (file)
-                                 (concat (file-name-directory prefix) file))
-                               candidates)
-                        :annotation-function
-                        (lambda (cand)
-                          (if (file-directory-p (expand-file-name cand cwd))
-                              " <dir>"
-                            ""))))))
+              (let ((dir (expand-file-name (file-name-directory prefix) cwd)))
+                (agent-shell--directory-completion
+                 start end dir (or (file-name-nondirectory prefix) "")
+                 (lambda (file) (concat (file-name-directory prefix) file))
+                 cwd)))
 
              ;; Case 4: @ with no path -> project-wide files
              (t
@@ -381,18 +372,12 @@ Completion behavior:
                                              (file-relative-name file proj-root))
                                            candidates)))
                     (list start end
-                          ;; Return completion table with metadata for fuzzy matching
-                          (lambda (string pred action)
-                            (if (eq action 'metadata)
-                                '(metadata (category . file))
-                              (complete-with-action action file-list string pred)))
+                          (agent-shell--make-file-completion-table file-list)
                           :annotation-function
                           (lambda (cand)
-                            (let ((current-proj (project-current nil)))
-                              (when current-proj
-                                (if (file-directory-p (expand-file-name cand (project-root current-proj)))
-                                    " <dir>"
-                                  ""))))))))))))))))
+                            ;; proj-root is captured in closure, no repeated lookups
+                            (when (file-directory-p (expand-file-name cand proj-root))
+                              " <dir>"))))))))))))))
 
 (defun agent-shell--maybe-trigger-file-completion ()
   "Trigger completion if @ was just typed."
@@ -849,6 +834,13 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
   "Resolve PATH using `agent-shell-path-resolver-function'."
   (funcall (or agent-shell-path-resolver-function #'identity) path))
 
+;; File mention support
+
+(defconst agent-shell--file-mention-regex
+  "\\(?:^\\|[[:space:]]\\)\\(@\\(?:\\\"\\([^\\\"]+\\)\\\"\\|\\([^[:space:]\\\"]+\\)\\)\\)"
+  "Regex to match @file mentions in text.
+Captures: group 1 = full mention, group 2 = quoted path, group 3 = unquoted path.")
+
 ;; File mention edge case handling
 
 (defcustom agent-shell-file-mention-max-size (* 1024 1024)
@@ -903,24 +895,22 @@ Returns t if safe, nil otherwise."
 Returns list of alists with :path, :match, :start, :end keys.
 File mentions use @ syntax: @filename or @\"file with spaces\".
 Example: ((:path \"file.txt\" :match \"@file.txt\" :start 10 :end 19))"
-  (let ((regex "\\(?:^\\|[[:space:]]\\)\\(@\\(?:\\\"\\([^\\\"]+\\)\\\"\\|\\([^[:space:]\\\"]+\\)\\)\\)")
-        (mentions '()))
-    (with-temp-buffer
-      (insert text)
-      (goto-char (point-min))
-      (while (re-search-forward regex nil t)
-        (let* ((full-match (match-string 1))
-               (quoted-path (match-string 2))
-               (unquoted-path (match-string 3))
-               (path (or quoted-path unquoted-path))
-               ;; Buffer positions are 1-indexed, convert to 0-indexed for substring
-               (start (1- (match-beginning 1)))
-               (end (1- (match-end 1))))
-          (push (list (cons :path path)
-                     (cons :match full-match)
-                     (cons :start start)
-                     (cons :end end))
-                mentions))))
+  (let ((mentions '())
+        (pos 0))
+    (while (string-match agent-shell--file-mention-regex text pos)
+      (let* ((full-match (match-string 1 text))
+             (quoted-path (match-string 2 text))
+             (unquoted-path (match-string 3 text))
+             (path (or quoted-path unquoted-path))
+             ;; string-match returns 0-indexed positions directly
+             (start (match-beginning 1))
+             (end (match-end 1)))
+        (push (list (cons :path path)
+                   (cons :match full-match)
+                   (cons :start start)
+                   (cons :end end))
+              mentions)
+        (setq pos (match-end 0))))
     (nreverse mentions)))
 
 (defun agent-shell--build-prompt-content (command-text)
