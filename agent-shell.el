@@ -335,10 +335,23 @@ Integrates with completion-at-point and company-mode."
                           " <dir>"
                         ""))))))))))
 
+(defun agent-shell--maybe-trigger-file-completion ()
+  "Trigger completion if @ was just typed."
+  (when (and (boundp 'company-mode)
+             company-mode
+             (eq (char-before) ?@))
+    (company-complete)))
+
 (defun agent-shell--setup-completion ()
   "Setup completion-at-point for file mentions."
   (add-hook 'completion-at-point-functions
-            #'agent-shell--file-mention-completion-at-point nil t))
+            #'agent-shell--file-mention-completion-at-point nil t)
+  ;; Allow company-mode to trigger immediately after @ (no minimum prefix)
+  (when (boundp 'company-minimum-prefix-length)
+    (setq-local company-minimum-prefix-length 0))
+  ;; Trigger completion automatically when @ is typed
+  (add-hook 'post-self-insert-hook
+            #'agent-shell--maybe-trigger-file-completion nil t))
 
 (add-hook 'agent-shell-mode-hook #'agent-shell--setup-completion)
 
