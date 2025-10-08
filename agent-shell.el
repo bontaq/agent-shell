@@ -402,14 +402,20 @@ Completion behavior:
     (company-complete)))
 
 (defun agent-shell--setup-completion ()
-  "Setup completion-at-point for file mentions."
+  "Setup completion-at-point for file mentions.
+
+Fuzzy matching works out of the box with built-in completion styles
+like `flex' (Emacs 27+) or third-party styles like `orderless'.
+
+If orderless is available, dots and slashes are configured as pattern
+separators for more intuitive matching (e.g., @us.ai matches using-ai-notes.org)."
   (add-hook 'completion-at-point-functions
             #'agent-shell--file-mention-completion-at-point nil t)
   ;; Allow company-mode to trigger immediately after @ (no minimum prefix)
   (when (boundp 'company-minimum-prefix-length)
     (setq-local company-minimum-prefix-length 0))
-  ;; Configure orderless to treat dots and slashes as component separators
-  ;; This enables patterns like @us.ai.not to match using-ai-notes.org
+  ;; Optional: Configure orderless to treat dots/slashes as separators
+  ;; Built-in `flex' style also works without this configuration
   (when (boundp 'orderless-component-separator)
     (setq-local orderless-component-separator "[ ./]"))
   ;; Trigger completion automatically when @ is typed
