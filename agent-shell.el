@@ -710,8 +710,9 @@ Example: ((:path \"file.txt\" :match \"@file.txt\" :start 10 :end 19))"
                (quoted-path (match-string 2))
                (unquoted-path (match-string 3))
                (path (or quoted-path unquoted-path))
-               (start (match-beginning 1))
-               (end (match-end 1)))
+               ;; Buffer positions are 1-indexed, convert to 0-indexed for substring
+               (start (1- (match-beginning 1)))
+               (end (1- (match-end 1))))
           (push (list (cons :path path)
                      (cons :match full-match)
                      (cons :start start)
