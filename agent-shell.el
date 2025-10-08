@@ -527,7 +527,7 @@ Completion behavior:
                (agent-shell--update-dialog-block
                 :state agent-shell--state
                 :block-id "attached-files"
-                :label-left (format "📎 %d file%s attached"
+                :label-left (format "%d file%s attached"
                                   (length attached-files)
                                   (if (= (length attached-files) 1) "" "s"))
                 :body (mapconcat (lambda (f) (format "  • %s" f))
