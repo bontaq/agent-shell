@@ -351,25 +351,31 @@ Completion behavior:
                  (lambda (file) (concat (file-name-directory prefix) file))
                  cwd)))
 
-             ;; Case 3: @ with no path -> project-wide files
+             ;; Case 3: @ with no path -> project-wide files, or current dir if no project
              (t
-              (let* ((proj (project-current nil))
-                     (candidates (when proj
-                                   (condition-case nil
-                                       (project-files proj)
-                                     (error nil)))))
-                (when candidates
-                  (let* ((proj-root (project-root proj))
-                         (file-list (mapcar (lambda (file)
-                                             (file-relative-name file proj-root))
-                                           candidates)))
-                    (list start end
-                          (agent-shell--make-file-completion-table file-list)
-                          :annotation-function
-                          (lambda (cand)
-                            ;; proj-root is captured in closure, no repeated lookups
-                            (when (file-directory-p (expand-file-name cand proj-root))
-                              " <dir>"))))))))))))))
+              (let* ((proj (project-current nil)))
+                (if proj
+                    ;; In a project - show project files
+                    (let* ((candidates (condition-case nil
+                                          (project-files proj)
+                                        (error nil))))
+                      (when candidates
+                        (let* ((proj-root (project-root proj))
+                               (file-list (mapcar (lambda (file)
+                                                   (file-relative-name file proj-root))
+                                                 candidates)))
+                          (list start end
+                                (agent-shell--make-file-completion-table file-list)
+                                :annotation-function
+                                (lambda (cand)
+                                  ;; proj-root is captured in closure, no repeated lookups
+                                  (when (file-directory-p (expand-file-name cand proj-root))
+                                    " <dir>"))))))
+                  ;; No project - fall back to current directory
+                  (agent-shell--directory-completion
+                   start end cwd ""
+                   (lambda (file) file)
+                   cwd)))))))))))
 
 (defun agent-shell--maybe-trigger-file-completion ()
   "Trigger completion if @ was just typed."
