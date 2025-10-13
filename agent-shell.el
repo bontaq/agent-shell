@@ -293,6 +293,21 @@ Returns a completion table function suitable for fuzzy matching."
         '(metadata (category . file))
       (complete-with-action action candidates string pred))))
 
+(defun agent-shell--extract-all-directory-components (file-path)
+  "Extract all directory components from FILE-PATH.
+For example, 'a/b/c/file.txt' returns '(\"a\" \"a/b\" \"a/b/c\")'."
+  (let ((dir (file-name-directory file-path))
+        (components nil))
+    (when dir
+      (setq dir (directory-file-name dir))
+      (while (not (string-empty-p dir))
+        (push dir components)
+        (let ((parent (file-name-directory dir)))
+          (if parent
+              (setq dir (directory-file-name parent))
+            (setq dir "")))))
+    components))
+
 (defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd)
   "Helper for directory-based completion.
 START and END are completion bounds, DIR is directory to search,
@@ -355,7 +370,7 @@ Completion behavior:
              (t
               (let* ((proj (project-current nil)))
                 (if proj
-                    ;; In a project - show project files
+                    ;; In a project - show project files and directories
                     (let* ((candidates (condition-case nil
                                           (project-files proj)
                                         (error nil))))
@@ -363,9 +378,16 @@ Completion behavior:
                         (let* ((proj-root (project-root proj))
                                (file-list (mapcar (lambda (file)
                                                    (file-relative-name file proj-root))
-                                                 candidates)))
+                                                 candidates))
+                               ;; Extract all directory components from all files
+                               (all-dirs (delete-dups
+                                          (apply #'append
+                                                 (mapcar #'agent-shell--extract-all-directory-components
+                                                         file-list))))
+                               ;; Combine directories and files
+                               (all-candidates (append all-dirs file-list)))
                           (list start end
-                                (agent-shell--make-file-completion-table file-list)
+                                (agent-shell--make-file-completion-table all-candidates)
                                 :annotation-function
                                 (lambda (cand)
                                   ;; proj-root is captured in closure, no repeated lookups
