@@ -308,6 +308,45 @@ For example, 'a/b/c/file.txt' returns '(\"a\" \"a/b\" \"a/b/c\")'."
             (setq dir "")))))
     components))
 
+(defun agent-shell--project-completion (start end proj-root candidates)
+  "Build completion for project CANDIDATES.
+START/END are bounds, PROJ-ROOT is project root, CANDIDATES are project files."
+  (let* ((file-list (mapcar (lambda (f) (file-relative-name f proj-root)) candidates))
+         (all-dirs (delete-dups (apply #'append (mapcar #'agent-shell--extract-all-directory-components file-list))))
+         (all-candidates (append all-dirs file-list)))
+    (list start end
+          (agent-shell--make-file-completion-table all-candidates)
+          :annotation-function
+          (lambda (cand)
+            (when (file-directory-p (expand-file-name cand proj-root))
+              " <dir>")))))
+
+(defun agent-shell--complete-bare-at (start end cwd)
+  "Complete @ with no path - project files or CWD.
+START/END are bounds, CWD is working directory."
+  (if-let ((proj (project-current nil))
+           (candidates (condition-case nil (project-files proj) (error nil))))
+      (agent-shell--project-completion start end (project-root proj) candidates)
+    (agent-shell--directory-completion start end cwd "" #'identity cwd)))
+
+(defun agent-shell--complete-absolute-path (start end prefix)
+  "Complete absolute path PREFIX.
+START/END are bounds."
+  (let ((dir (or (file-name-directory prefix) "/")))
+    (agent-shell--directory-completion
+     start end dir (or (file-name-nondirectory prefix) "")
+     (lambda (file) (concat dir file))
+     dir)))
+
+(defun agent-shell--complete-relative-path (start end prefix cwd)
+  "Complete relative path PREFIX from CWD.
+START/END are bounds."
+  (let ((dir (expand-file-name (file-name-directory prefix) cwd)))
+    (agent-shell--directory-completion
+     start end dir (or (file-name-nondirectory prefix) "")
+     (lambda (file) (concat (file-name-directory prefix) file))
+     cwd)))
+
 (defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd)
   "Helper for directory-based completion.
 START and END are completion bounds, DIR is directory to search,
@@ -332,79 +371,28 @@ CWD is current working directory for annotation."
 
 (defun agent-shell--file-mention-completion-at-point ()
   "Provide file path completion after @ symbol.
-Integrates with completion-at-point and company-mode.
 
 Completion behavior:
-  @filename    -> All files in project (using project.el)
+  @filename    -> Project files or current directory
   @path/file   -> Files in relative path subdirectory
   @/abs/path   -> Absolute path completion"
   (save-excursion
-    ;; Look backward to find @ symbol
-    (let ((end (point))
-          (start nil))
-      ;; Search backward for @ followed by filename chars or nothing
+    (let ((end (point)))
       (when (re-search-backward "@\\([^@[:space:]]*\\)" (line-beginning-position) t)
-        (setq start (match-beginning 1))
-        ;; Make sure we're at the right position (within or right after the @)
-        (when (and (>= end start) (<= end (match-end 1)))
-          (let* ((prefix (buffer-substring-no-properties start end))
-                 (cwd (agent-shell-cwd)))
-            (cond
-             ;; Case 1: Absolute path
-             ((string-prefix-p "/" prefix)
-              (let ((dir (or (file-name-directory prefix) "/")))
-                (agent-shell--directory-completion
-                 start end dir (or (file-name-nondirectory prefix) "")
-                 (lambda (file) (concat dir file))
-                 dir)))
+        (let ((start (match-beginning 1)))
+          (when (and (>= end start) (<= end (match-end 1)))
+            (let ((prefix (buffer-substring-no-properties start end))
+                  (cwd (agent-shell-cwd)))
+              (cond
+               ((string-prefix-p "/" prefix) (agent-shell--complete-absolute-path start end prefix))
+               ((file-name-directory prefix) (agent-shell--complete-relative-path start end prefix cwd))
+               (t (agent-shell--complete-bare-at start end cwd))))))))))
 
-             ;; Case 2: Relative path with directory (e.g., src/file, ./file, .config/file)
-             ((file-name-directory prefix)
-              (let ((dir (expand-file-name (file-name-directory prefix) cwd)))
-                (agent-shell--directory-completion
-                 start end dir (or (file-name-nondirectory prefix) "")
-                 (lambda (file) (concat (file-name-directory prefix) file))
-                 cwd)))
-
-             ;; Case 3: @ with no path -> project-wide files, or current dir if no project
-             (t
-              (let* ((proj (project-current nil)))
-                (if proj
-                    ;; In a project - show project files and directories
-                    (let* ((candidates (condition-case nil
-                                          (project-files proj)
-                                        (error nil))))
-                      (when candidates
-                        (let* ((proj-root (project-root proj))
-                               (file-list (mapcar (lambda (file)
-                                                   (file-relative-name file proj-root))
-                                                 candidates))
-                               ;; Extract all directory components from all files
-                               (all-dirs (delete-dups
-                                          (apply #'append
-                                                 (mapcar #'agent-shell--extract-all-directory-components
-                                                         file-list))))
-                               ;; Combine directories and files
-                               (all-candidates (append all-dirs file-list)))
-                          (list start end
-                                (agent-shell--make-file-completion-table all-candidates)
-                                :annotation-function
-                                (lambda (cand)
-                                  ;; proj-root is captured in closure, no repeated lookups
-                                  (when (file-directory-p (expand-file-name cand proj-root))
-                                    " <dir>"))))))
-                  ;; No project - fall back to current directory
-                  (agent-shell--directory-completion
-                   start end cwd ""
-                   (lambda (file) file)
-                   cwd)))))))))))
 
 (defun agent-shell--maybe-trigger-file-completion ()
-  "Trigger completion if @ was just typed."
-  (when (and (boundp 'company-mode)
-             company-mode
-             (eq (char-before) ?@))
-    (company-complete)))
+  "Trigger native completion if @ was just typed."
+  (when (eq (char-before) ?@)
+    (completion-at-point)))
 
 (defun agent-shell--setup-completion ()
   "Setup completion-at-point for file mentions.
@@ -416,9 +404,6 @@ If orderless is available, dots and slashes are configured as pattern
 separators for more intuitive matching (e.g., @us.ai matches using-ai-notes.org)."
   (add-hook 'completion-at-point-functions
             #'agent-shell--file-mention-completion-at-point nil t)
-  ;; Allow company-mode to trigger immediately after @ (no minimum prefix)
-  (when (boundp 'company-minimum-prefix-length)
-    (setq-local company-minimum-prefix-length 0))
   ;; Optional: Configure orderless to treat dots/slashes as separators
   ;; Built-in `flex' style also works without this configuration
   (when (boundp 'orderless-component-separator)
