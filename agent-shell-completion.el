@@ -26,7 +26,7 @@
 ;; Features:
 ;; - Auto-completion after @ symbol
 ;; - Project-wide file completion using project.el
-;; - Fuzzy matching support (orderless, flex)
+;; - Fuzzy matching support (flex)
 ;; - Relative and absolute path completion
 ;; - Directory completion with annotations
 
@@ -147,18 +147,9 @@ Completion behavior:
 (defun agent-shell-completion-setup ()
   "Setup completion-at-point for file mentions.
 
-Fuzzy matching works out of the box with built-in completion styles
-like `flex' (Emacs 27+) or third-party styles like `orderless'.
-
-If orderless is available, dots and slashes are configured as pattern
-separators for more intuitive matching (e.g., @us.ai matches using-ai-notes.org)."
+Fuzzy matching works with built-in completion styles like `flex' (Emacs 27+)."
   (add-hook 'completion-at-point-functions
             #'agent-shell-completion--file-mention-completion-at-point nil t)
-  ;; Optional: Configure orderless to treat dots/slashes as separators
-  ;; Built-in `flex' style also works without this configuration
-  (when (boundp 'orderless-component-separator)
-    (setq-local orderless-component-separator "[ ./]"))
-  ;; Trigger completion automatically when @ is typed
   (add-hook 'post-self-insert-hook
             #'agent-shell-completion--maybe-trigger-file-completion nil t))
 
