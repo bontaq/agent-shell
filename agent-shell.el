@@ -46,6 +46,7 @@
 (require 'sui)
 (require 'svg nil :noerror)
 (require 'quick-diff)
+(require 'agent-shell-completion)
 (require 'agent-shell-anthropic)
 (require 'agent-shell-google)
 (require 'agent-shell-goose)
@@ -285,134 +286,7 @@ Returns an empty string if no icon should be displayed."
 
 (shell-maker-define-major-mode (agent-shell--make-config) agent-shell-mode-map)
 
-(defun agent-shell--make-file-completion-table (candidates)
-  "Create completion table for CANDIDATES with file metadata.
-Returns a completion table function suitable for fuzzy matching."
-  (lambda (string pred action)
-    (if (eq action 'metadata)
-        '(metadata (category . file))
-      (complete-with-action action candidates string pred))))
-
-(defun agent-shell--extract-all-directory-components (file-path)
-  "Extract all directory components from FILE-PATH.
-For example, 'a/b/c/file.txt' returns '(\"a\" \"a/b\" \"a/b/c\")'."
-  (let ((dir (file-name-directory file-path))
-        (components nil))
-    (when dir
-      (setq dir (directory-file-name dir))
-      (while (not (string-empty-p dir))
-        (push dir components)
-        (let ((parent (file-name-directory dir)))
-          (if parent
-              (setq dir (directory-file-name parent))
-            (setq dir "")))))
-    components))
-
-(defun agent-shell--project-completion (start end proj-root candidates)
-  "Build completion for project CANDIDATES.
-START/END are bounds, PROJ-ROOT is project root, CANDIDATES are project files."
-  (let* ((file-list (mapcar (lambda (f) (file-relative-name f proj-root)) candidates))
-         (all-dirs (delete-dups (apply #'append (mapcar #'agent-shell--extract-all-directory-components file-list))))
-         (all-candidates (append all-dirs file-list)))
-    (list start end
-          (agent-shell--make-file-completion-table all-candidates)
-          :annotation-function
-          (lambda (cand)
-            (when (file-directory-p (expand-file-name cand proj-root))
-              " <dir>")))))
-
-(defun agent-shell--complete-bare-at (start end cwd)
-  "Complete @ with no path - project files or CWD.
-START/END are bounds, CWD is working directory."
-  (if-let ((proj (project-current nil))
-           (candidates (condition-case nil (project-files proj) (error nil))))
-      (agent-shell--project-completion start end (project-root proj) candidates)
-    (agent-shell--directory-completion start end cwd "" #'identity cwd)))
-
-(defun agent-shell--complete-absolute-path (start end prefix)
-  "Complete absolute path PREFIX.
-START/END are bounds."
-  (let ((dir (or (file-name-directory prefix) "/")))
-    (agent-shell--directory-completion
-     start end dir (or (file-name-nondirectory prefix) "")
-     (lambda (file) (concat dir file))
-     dir)))
-
-(defun agent-shell--complete-relative-path (start end prefix cwd)
-  "Complete relative path PREFIX from CWD.
-START/END are bounds."
-  (let ((dir (expand-file-name (file-name-directory prefix) cwd)))
-    (agent-shell--directory-completion
-     start end dir (or (file-name-nondirectory prefix) "")
-     (lambda (file) (concat (file-name-directory prefix) file))
-     cwd)))
-
-(defun agent-shell--directory-completion (start end dir file-prefix prefix-transform cwd)
-  "Helper for directory-based completion.
-START and END are completion bounds, DIR is directory to search,
-FILE-PREFIX filters files, PREFIX-TRANSFORM is function to transform results,
-CWD is current working directory for annotation."
-  (let ((candidates (when (file-directory-p dir)
-                     (condition-case nil
-                         (directory-files dir nil
-                                        (if (string-empty-p file-prefix)
-                                            nil  ; No filter - show all files
-                                          (concat "^" (regexp-quote file-prefix))))
-                       (error nil)))))
-    (when candidates
-      (list start end
-            (agent-shell--make-file-completion-table
-             (mapcar prefix-transform candidates))
-            :annotation-function
-            (lambda (cand)
-              (if (file-directory-p (expand-file-name cand cwd))
-                  " <dir>"
-                ""))))))
-
-(defun agent-shell--file-mention-completion-at-point ()
-  "Provide file path completion after @ symbol.
-
-Completion behavior:
-  @filename    -> Project files or current directory
-  @path/file   -> Files in relative path subdirectory
-  @/abs/path   -> Absolute path completion"
-  (save-excursion
-    (let ((end (point)))
-      (when (re-search-backward "@\\([^@[:space:]]*\\)" (line-beginning-position) t)
-        (let ((start (match-beginning 1)))
-          (when (and (>= end start) (<= end (match-end 1)))
-            (let ((prefix (buffer-substring-no-properties start end))
-                  (cwd (agent-shell-cwd)))
-              (cond
-               ((string-prefix-p "/" prefix) (agent-shell--complete-absolute-path start end prefix))
-               ((file-name-directory prefix) (agent-shell--complete-relative-path start end prefix cwd))
-               (t (agent-shell--complete-bare-at start end cwd))))))))))
-
-
-(defun agent-shell--maybe-trigger-file-completion ()
-  "Trigger native completion if @ was just typed."
-  (when (eq (char-before) ?@)
-    (completion-at-point)))
-
-(defun agent-shell--setup-completion ()
-  "Setup completion-at-point for file mentions.
-
-Fuzzy matching works out of the box with built-in completion styles
-like `flex' (Emacs 27+) or third-party styles like `orderless'.
-
-If orderless is available, dots and slashes are configured as pattern
-separators for more intuitive matching (e.g., @us.ai matches using-ai-notes.org)."
-  (add-hook 'completion-at-point-functions
-            #'agent-shell--file-mention-completion-at-point nil t)
-  ;; Optional: Configure orderless to treat dots/slashes as separators
-  ;; Built-in `flex' style also works without this configuration
-  (when (boundp 'orderless-component-separator)
-    (setq-local orderless-component-separator "[ ./]"))
-  ;; Trigger completion automatically when @ is typed
-  (add-hook 'post-self-insert-hook
-            #'agent-shell--maybe-trigger-file-completion nil t))
-
-(add-hook 'agent-shell-mode-hook #'agent-shell--setup-completion)
+(add-hook 'agent-shell-mode-hook #'agent-shell-completion-setup)
 
 (cl-defun agent-shell--handle (&key command shell)
   "Handle COMMAND using `shell-maker' SHELL."
