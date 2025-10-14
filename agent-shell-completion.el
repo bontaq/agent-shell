@@ -46,7 +46,7 @@ Returns a completion table function suitable for fuzzy matching."
 
 (defun agent-shell-completion--extract-all-directory-components (file-path)
   "Extract all directory components from FILE-PATH.
-For example, 'a/b/c/file.txt' returns '(\"a\" \"a/b\" \"a/b/c\")'."
+For example, `a/b/c/file.txt' returns `(\"a\" \"a/b\" \"a/b/c\")'."
   (let ((dir (file-name-directory file-path))
         (components nil))
     (when dir
@@ -101,15 +101,15 @@ START/END are bounds."
 (defun agent-shell-completion--directory-completion (start end dir file-prefix prefix-transform cwd)
   "Helper for directory-based completion.
 START and END are completion bounds, DIR is directory to search,
-FILE-PREFIX filters files, PREFIX-TRANSFORM is function to transform results,
+FILE-PREFIX is the partial filename typed (used to determine if dotfiles shown),
+PREFIX-TRANSFORM is function to transform results,
 CWD is current working directory for annotation."
-  (let ((candidates (when (file-directory-p dir)
-                     (condition-case nil
-                         (directory-files dir nil
-                                        (if (string-empty-p file-prefix)
-                                            nil  ; No filter - show all files
-                                          (concat "^" (regexp-quote file-prefix))))
-                       (error nil)))))
+  (let* ((show-dotfiles (string-prefix-p "." file-prefix))
+         (match-regex (if show-dotfiles "^\\." "^[^.]"))
+         (candidates (when (file-directory-p dir)
+                       (condition-case nil
+                           (directory-files dir nil match-regex)
+                         (error nil)))))
     (when candidates
       (list start end
             (agent-shell-completion--make-file-completion-table
@@ -124,16 +124,20 @@ CWD is current working directory for annotation."
   "Provide file path completion after @ symbol.
 
 Completion behavior:
-  @filename    -> Project files or current directory
-  @path/file   -> Files in relative path subdirectory
-  @/abs/path   -> Absolute path completion"
+  @filename       -> Project files or current directory
+  @path/file      -> Files in relative path subdirectory
+  @/abs/path      -> Absolute path completion
+  @\"file space\"  -> Quoted filename completion"
   (save-excursion
     (let ((end (point)))
-      (when (re-search-backward "@\\([^@[:space:]]*\\)" (line-beginning-position) t)
-        (let ((start (match-beginning 1)))
-          (when (and (>= end start) (<= end (match-end 1)))
-            (let ((prefix (buffer-substring-no-properties start end))
-                  (cwd (agent-shell-cwd)))
+      (when (re-search-backward "@\\(?:\"\\([^\"]*\\)\\|\\([^[:space:]\"]*\\)\\)" (line-beginning-position) t)
+        (let* ((quoted-path (match-string 1))
+               (unquoted-path (match-string 2))
+               (is-quoted (not (null quoted-path)))
+               (prefix (or quoted-path unquoted-path ""))
+               (start (match-beginning (if is-quoted 1 2))))
+          (when (and (>= end start) (<= end (match-end (if is-quoted 1 2))))
+            (let ((cwd (agent-shell-cwd)))
               (cond
                ((string-prefix-p "/" prefix) (agent-shell-completion--complete-absolute-path start end prefix))
                ((file-name-directory prefix) (agent-shell-completion--complete-relative-path start end prefix cwd))
@@ -145,7 +149,7 @@ Completion behavior:
     (completion-at-point)))
 
 (defun agent-shell-completion-setup ()
-  "Setup completion-at-point for file mentions.
+  "Setup `completion-at-point' for file mentions.
 
 Fuzzy matching works with built-in completion styles like `flex' (Emacs 27+)."
   (add-hook 'completion-at-point-functions

@@ -119,5 +119,67 @@
       ;; Cleanup
       (delete-directory temp-dir t))))
 
+(ert-deftest agent-shell-completion--fuzzy-matching-test ()
+  "Test that fuzzy matching works (no pre-filtering)."
+  (let* ((temp-dir (make-temp-file "agent-shell-test" t))
+         (file1 (expand-file-name "test-file.txt" temp-dir))
+         (file2 (expand-file-name "my-test.el" temp-dir))
+         (file3 (expand-file-name "other.txt" temp-dir)))
+
+    (unwind-protect
+        (progn
+          (with-temp-file file1 (insert "test1"))
+          (with-temp-file file2 (insert "test2"))
+          (with-temp-file file3 (insert "test3"))
+
+          (cl-letf (((symbol-function 'agent-shell-cwd)
+                     (lambda () temp-dir))
+                    ((symbol-function 'project-current)
+                     (lambda (&optional _) nil)))
+
+            (with-temp-buffer
+              ;; Type @te - should get ALL files, not just ones starting with "te"
+              (insert "@te")
+              (let* ((result (agent-shell-completion--file-mention-completion-at-point))
+                     (table (nth 2 result))
+                     (all-candidates (funcall table "" nil t)))
+                ;; Should include files that DON'T start with "te"
+                (should (member "my-test.el" all-candidates))
+                (should (member "test-file.txt" all-candidates))
+                (should (member "other.txt" all-candidates))))))
+
+      (delete-directory temp-dir t))))
+
+(ert-deftest agent-shell-completion--quoted-filename-test ()
+  "Test completion with quoted filenames."
+  (let* ((temp-dir (make-temp-file "agent-shell-test" t))
+         (file1 (expand-file-name "file with spaces.txt" temp-dir)))
+
+    (unwind-protect
+        (progn
+          (with-temp-file file1 (insert "test"))
+
+          (cl-letf (((symbol-function 'agent-shell-cwd)
+                     (lambda () temp-dir))
+                    ((symbol-function 'project-current)
+                     (lambda (&optional _) nil)))
+
+            (with-temp-buffer
+              ;; Test completion after @"
+              (insert "test @\"file")
+              (let ((result (agent-shell-completion--file-mention-completion-at-point)))
+                (should result)
+                ;; Position after @" is 8, "file" ends at 12
+                (should (= (nth 0 result) 8))   ; start after @"
+                (should (= (nth 1 result) 12))) ; end after "file"
+
+              ;; Test completion with just @"
+              (erase-buffer)
+              (insert "@\"")
+              (let ((result (agent-shell-completion--file-mention-completion-at-point)))
+                (should result)))))
+
+      (delete-directory temp-dir t))))
+
 (provide 'agent-shell-completion-tests)
 ;;; agent-shell-completion-tests.el ends here
