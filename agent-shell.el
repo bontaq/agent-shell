@@ -46,6 +46,7 @@
 (require 'sui)
 (require 'svg nil :noerror)
 (require 'quick-diff)
+(require 'agent-shell-completion)
 (require 'agent-shell-anthropic)
 (require 'agent-shell-google)
 (require 'agent-shell-goose)
@@ -285,6 +286,8 @@ Returns an empty string if no icon should be displayed."
 
 (shell-maker-define-major-mode (agent-shell--make-config) agent-shell-mode-map)
 
+(add-hook 'agent-shell-mode-hook #'agent-shell-completion-setup)
+
 (cl-defun agent-shell--handle (&key command shell)
   "Handle COMMAND using `shell-maker' SHELL."
   (with-current-buffer (map-elt shell :buffer)
@@ -339,7 +342,8 @@ Returns an empty string if no icon should be displayed."
             :request (acp-make-initialize-request
                       :protocol-version 1
                       :read-text-file-capability agent-shell-text-file-capabilities
-                      :write-text-file-capability agent-shell-text-file-capabilities)
+                      :write-text-file-capability agent-shell-text-file-capabilities
+                      :embedded-context-capability t) ; Enable for file mention support
             :on-success (lambda (_response)
                           ;; TODO: More to be handled?
                           (with-current-buffer (map-elt shell :buffer)
@@ -393,13 +397,27 @@ Returns an empty string if no icon should be displayed."
             :on-failure (agent-shell--make-error-handler
                          :state agent-shell--state :shell shell)))
           (t
-           (acp-send-request
-            :client (map-elt agent-shell--state :client)
-            :request (acp-make-session-prompt-request
-                      :session-id (map-elt agent-shell--state :session-id)
-                      :prompt `[((type . "text")
-                                 (text . ,(substring-no-properties command)))])
-            :on-success (lambda (response)
+           (let* ((prompt-result (agent-shell--build-prompt-content command))
+                  (prompt-content (car prompt-result))
+                  (attached-files (cdr prompt-result)))
+             ;; Show dialog for attached files
+             (when attached-files
+               (agent-shell--update-dialog-block
+                :state agent-shell--state
+                :block-id "attached-files"
+                :label-left (format "%d file%s attached"
+                                  (length attached-files)
+                                  (if (= (length attached-files) 1) "" "s"))
+                :body (mapconcat (lambda (f) (format "  • %s" f))
+                                attached-files
+                                "\n")
+                :create-new t))
+             (acp-send-request
+              :client (map-elt agent-shell--state :client)
+              :request (acp-make-session-prompt-request
+                        :session-id (map-elt agent-shell--state :session-id)
+                        :prompt prompt-content)
+              :on-success (lambda (response)
                           (with-current-buffer (map-elt shell :buffer)
                             (let ((success (equal (map-elt response 'stopReason)
                                                   "end_turn")))
@@ -408,9 +426,9 @@ Returns an empty string if no icon should be displayed."
                                          (agent-shell--stop-reason-description
                                           (map-elt response 'stopReason))))
                               (funcall (map-elt shell :finish-output) t))))
-            :on-failure (lambda (error raw-message)
-                          (funcall (agent-shell--make-error-handler :state agent-shell--state :shell shell)
-                                   error raw-message)))))))
+              :on-failure (lambda (error raw-message)
+                            (funcall (agent-shell--make-error-handler :state agent-shell--state :shell shell)
+                                     error raw-message))))))))
 
 (cl-defun agent-shell--subscribe-to-client-events (&key state)
   "Subscribe SHELL and STATE to ACP events."
@@ -694,6 +712,166 @@ LINE defaults to 1, LIMIT defaults to nil (read to end)."
 (defun agent-shell--resolve-path (path)
   "Resolve PATH using `agent-shell-path-resolver-function'."
   (funcall (or agent-shell-path-resolver-function #'identity) path))
+
+;; File mention support
+
+(defconst agent-shell--file-mention-regex
+  "\\(?:^\\|[[:space:]]\\)\\(@\\(?:\\\"\\([^\\\"]+\\)\\\"\\|\\([^[:space:]\\\"]+\\)\\)\\)"
+  "Regex to match @file mentions in text.
+Captures: group 1 = full mention, group 2 = quoted path, group 3 = unquoted path.")
+
+;; File mention edge case handling
+
+(defcustom agent-shell-file-mention-max-size (* 1024 1024)
+  "Maximum file size in bytes for file mentions.
+Files larger than this will be rejected.
+Default is 1MB (1048576 bytes)."
+  :type 'integer
+  :group 'agent-shell)
+
+(defcustom agent-shell-file-mention-text-extensions
+  '("txt" "md" "org" "el" "lisp" "c" "cpp" "h" "hpp" "py" "js" "ts" "tsx" "jsx"
+    "java" "go" "rs" "rb" "php" "sh" "bash" "zsh" "fish" "json" "xml" "yaml" "yml"
+    "toml" "ini" "conf" "cfg" "html" "css" "scss" "sass" "less" "sql" "r"
+    "tex" "lua" "vim" "clj" "cljs" "edn" "scm" "rkt" "hs" "ml" "fs" "swift"
+    "kt" "kts" "scala" "dart" "erl" "ex" "exs" "jl" "nim" "zig" "v" "makefile")
+  "File extensions considered safe text files for mentions."
+  :type '(repeat string)
+  :group 'agent-shell)
+
+(defun agent-shell--check-file-size (path)
+  "Check if file at PATH exceeds size limit.
+Returns nil if ok, error message string if too large."
+  (let ((size (file-attribute-size (file-attributes path))))
+    (when (and size (> size agent-shell-file-mention-max-size))
+      (format "File too large: %.1f MB (max %.1f MB)"
+              (/ size 1048576.0)
+              (/ agent-shell-file-mention-max-size 1048576.0)))))
+
+(defun agent-shell--is-text-file-p (path)
+  "Check if file at PATH is likely a text file.
+Returns t if text, nil if binary."
+  (let ((ext (downcase (or (file-name-extension path) ""))))
+    (or (member ext agent-shell-file-mention-text-extensions)
+        ;; Fallback: scan first 8KB for null bytes
+        (condition-case nil
+            (with-temp-buffer
+              (insert-file-contents path nil 0 (min 8192 (file-attribute-size
+                                                           (file-attributes path))))
+              (not (string-match-p "\000" (buffer-string))))
+          (error nil)))))
+
+(defun agent-shell--is-safe-path-p (path cwd)
+  "Check if PATH is safe to read relative to CWD.
+Returns t if safe, nil otherwise."
+  (let ((resolved (expand-file-name path cwd)))
+    (or (file-in-directory-p resolved cwd)
+        ;; Allow absolute paths only if they're explicitly provided
+        (file-name-absolute-p path))))
+
+(defun agent-shell--parse-file-mentions (text)
+  "Parse file mentions from TEXT.
+Returns list of alists with :path, :match, :start, :end keys.
+File mentions use @ syntax: @filename or @\"file with spaces\".
+Example: ((:path \"file.txt\" :match \"@file.txt\" :start 10 :end 19))"
+  (let ((mentions '())
+        (pos 0))
+    (while (string-match agent-shell--file-mention-regex text pos)
+      (let* ((full-match (match-string 1 text))
+             (quoted-path (match-string 2 text))
+             (unquoted-path (match-string 3 text))
+             (path (or quoted-path unquoted-path))
+             ;; string-match returns 0-indexed positions directly
+             (start (match-beginning 1))
+             (end (match-end 1)))
+        (push (list (cons :path path)
+                   (cons :match full-match)
+                   (cons :start start)
+                   (cons :end end))
+              mentions)
+        (setq pos (match-end 0))))
+    (nreverse mentions)))
+
+(defun agent-shell--build-prompt-content (command-text)
+  "Build multi-content prompt array from COMMAND-TEXT with file mentions.
+Returns cons (CONTENT . ATTACHED-FILES) where:
+- CONTENT is vector suitable for acp-make-session-prompt-request :prompt parameter
+- ATTACHED-FILES is list of successfully attached file paths
+Parses @file mentions and embeds file contents as ContentBlock::Resource."
+  (let* ((mentions (agent-shell--parse-file-mentions command-text))
+         (content-blocks '())
+         (attached-files '())
+         (last-pos 0))
+
+    (if (null mentions)
+        ;; No mentions - return simple text block
+        (cons (vector `((type . "text")
+                       (text . ,(substring-no-properties command-text))))
+              nil)
+
+      ;; Process mentions and interleave text blocks
+      (dolist (mention mentions)
+        (let* ((path (map-elt mention :path))
+               (start (map-elt mention :start))
+               (end (map-elt mention :end))
+               (resolved-path nil))
+
+          ;; Add text before this mention
+          (when (> start last-pos)
+            (push `((type . "text")
+                   (text . ,(substring-no-properties command-text last-pos start)))
+                  content-blocks))
+
+          ;; Try to read and add resource block
+          (condition-case err
+              (progn
+                (setq resolved-path
+                      (agent-shell--resolve-path
+                       (expand-file-name path (agent-shell-cwd))))
+
+                ;; Validate file
+                (unless (file-exists-p resolved-path)
+                  (error "File not found"))
+                (unless (file-readable-p resolved-path)
+                  (error "Permission denied"))
+                (unless (agent-shell--is-safe-path-p path (agent-shell-cwd))
+                  (error "Path outside workspace"))
+                (when-let ((size-error (agent-shell--check-file-size resolved-path)))
+                  (error "%s" size-error))
+                (unless (agent-shell--is-text-file-p resolved-path)
+                  (error "Binary file not supported"))
+
+                ;; Read file content
+                (let ((content (with-temp-buffer
+                                (insert-file-contents resolved-path)
+                                (buffer-string))))
+                  ;; Add resource block
+                  (push `((type . "resource")
+                         (resource . ((uri . ,(concat "file://" resolved-path))
+                                     (text . ,content)
+                                     (mimeType . "text/plain"))))
+                        content-blocks)
+                  ;; Track successfully attached file
+                  (push path attached-files)))
+            (error
+             ;; On error, add text block with error message
+             (push `((type . "text")
+                    (text . ,(format "[Error reading %s: %s]"
+                                   path
+                                   (error-message-string err))))
+                   content-blocks)))
+
+          (setq last-pos end)))
+
+      ;; Add remaining text after last mention
+      (when (< last-pos (length command-text))
+        (push `((type . "text")
+               (text . ,(substring-no-properties command-text last-pos)))
+              content-blocks))
+
+      ;; Return content and attached files list
+      (cons (vconcat (nreverse content-blocks))
+            (nreverse attached-files)))))
 
 (defun agent-shell--get-devcontainer-workspace-path (cwd)
   "Return devcontainer workspaceFolder for CWD; signal error if none found.
